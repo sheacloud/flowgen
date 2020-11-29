@@ -1,0 +1,3 @@
+Max size of a set sent over UDP is 65535(ish) bytes
+message has header of 16 bytes + set header of 4 bytes. Current 7-tuple is 29 bytes per record, no padding between records
+size of message with current setup = 16 (for message header) + 4 (for set record header, assuming 1 set per message) + 29*numRecords
