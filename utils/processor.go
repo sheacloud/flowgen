@@ -6,18 +6,18 @@ import (
 )
 
 type FlowProcessor struct {
-	FlowGenerator *FlowGenerator
+	FlowExporters []*FlowExporter
 	Channel       chan Flow7Tuple
 	Quit          chan bool
 	EndWG         sync.WaitGroup
 	BufferSize    int
 }
 
-func NewFlowProcessor(generator *FlowGenerator, bufferSize int) *FlowProcessor {
+func NewFlowProcessor(generators []*FlowExporter, bufferSize int) *FlowProcessor {
 	channel := make(chan Flow7Tuple, bufferSize)
 
 	fp := FlowProcessor{
-		FlowGenerator: generator,
+		FlowExporters: generators,
 		Channel:       channel,
 		Quit:          make(chan bool),
 		BufferSize:    bufferSize,
@@ -31,18 +31,24 @@ func (fp *FlowProcessor) PutFlow(flow Flow7Tuple) {
 }
 
 func (fp *FlowProcessor) Start() {
-	fp.EndWG.Add(1)
-	go func() {
-		for flow := range fp.Channel {
-			if fp.FlowGenerator.GetCurrentMessageSize() >= 65000 {
-				fp.FlowGenerator.SendDataSet()
+	fp.EndWG.Add(len(fp.FlowExporters))
+
+	for i := 0; i < len(fp.FlowExporters); i++ {
+		go func(flowgen *FlowExporter) {
+			fmt.Println("Starting flow processor")
+			for flow := range fp.Channel {
+				if flowgen.GetCurrentMessageSize() >= 8955 {
+					flowgen.SendDataSet()
+				}
+				flowgen.GenerateFlowMessage(flow)
 			}
-			fp.FlowGenerator.GenerateFlowMessage(flow)
-		}
-		fmt.Println("flow processor shutting down")
-		fp.FlowGenerator.SendDataSet()
-		fp.EndWG.Done()
-	}()
+			fmt.Println("flow processor shutting down")
+			flowgen.SendDataSet()
+			flowgen.CloseExporter()
+			fp.EndWG.Done()
+		}(fp.FlowExporters[i])
+	}
+
 }
 
 func (fp *FlowProcessor) Stop() {

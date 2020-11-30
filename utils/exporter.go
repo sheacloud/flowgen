@@ -9,72 +9,76 @@ import (
 	"github.com/vmware/go-ipfix/pkg/registry"
 )
 
-type FlowGenerator struct {
-	exporter   *exporter.ExportingProcess
-	dataSet    entities.Set
-	templateID uint16
+type FlowExporter struct {
+	exporter        *exporter.ExportingProcess
+	dataSet         entities.Set
+	templateID      uint16
+	FlowRecordsSent uint64
 }
 
-func (f *FlowGenerator) Initialize(collectorIp net.IP, collectorPort int) {
+func NewFlowExporter(collectorIp net.IP, collectorPort int) *FlowExporter {
+	fg := FlowExporter{}
+
 	udpAddr := net.UDPAddr{
 		IP:   collectorIp,
 		Port: collectorPort,
 	}
 	exporter, _ := exporter.InitExportingProcess(&udpAddr, 1, 0)
-	f.exporter = exporter
+	fg.exporter = exporter
 
-	templateElementNames := []string{"sourceIPv4Address", "destinationIPv4Address", "sourceTransportPort", "destinationTransportPort", "protocolIdentifier", "flowStartMilliseconds", "flowEndMilliseconds"}
+	templateElementNames := []string{"sourceIPv4Address", "destinationIPv4Address", "sourceTransportPort", "destinationTransportPort", "protocolIdentifier", "flowStartMilliseconds", "flowEndMilliseconds", "octetTotalCount", "packetTotalCount"}
 	// Create template record with two fields
-	f.templateID = f.exporter.NewTemplateID()
-	templateSet := entities.NewSet(entities.Template, f.templateID, false)
+	fg.templateID = fg.exporter.NewTemplateID()
+	templateSet := entities.NewSet(entities.Template, fg.templateID, false)
 	elements := make([]*entities.InfoElementWithValue, 0)
 
 	for _, elementName := range templateElementNames {
 		element, err := registry.GetInfoElement(elementName, registry.IANAEnterpriseID)
 		if err != nil {
 			fmt.Printf("Did not find the element with name %v\n", elementName)
-			return
+			return nil
 		}
 		ie := entities.NewInfoElementWithValue(element, nil)
 		elements = append(elements, ie)
 	}
 
-	templateSet.AddRecord(elements, f.templateID)
+	templateSet.AddRecord(elements, fg.templateID)
 
-	bytesSent, err := f.exporter.AddSetAndSendMsg(entities.Template, templateSet)
+	bytesSent, err := fg.exporter.AddSetAndSendMsg(entities.Template, templateSet)
 	if err != nil {
 		fmt.Printf("Got error when sending record: %v\n", err)
-		return
+		return nil
 	}
 	// Sleep for 2s for template refresh routine to get executed
 	fmt.Printf("sent template: %v\n", bytesSent)
 
-	dataSet := entities.NewSet(entities.Data, f.templateID, false)
-	f.dataSet = dataSet
+	dataSet := entities.NewSet(entities.Data, fg.templateID, false)
+	fg.dataSet = dataSet
+
+	return &fg
 }
 
-func (f *FlowGenerator) GetCurrentMessageSize() int {
-	return 20 + (29 * int(f.dataSet.GetBuffLen()))
+func (f *FlowExporter) GetCurrentMessageSize() int {
+	return 20 + int(f.dataSet.GetBuffLen())
 }
 
-func (f *FlowGenerator) SendDataSet() {
+func (f *FlowExporter) SendDataSet() {
 
 	_, err := f.exporter.AddSetAndSendMsg(entities.Data, f.dataSet)
 	if err != nil {
 		fmt.Printf("Got error when sending record: %v\n", err)
 		return
 	}
-	// 28 is the size of the IPFIX message including all headers (20 bytes)
-	// fmt.Println(bytesSent)
+	f.FlowRecordsSent += uint64(len(f.dataSet.GetRecords()))
 
 	f.dataSet = entities.NewSet(entities.Data, f.templateID, false)
 }
 
-func (f *FlowGenerator) CloseExporter() {
+func (f *FlowExporter) CloseExporter() {
 	f.exporter.CloseConnToCollector()
 }
 
-func (f *FlowGenerator) GenerateFlowMessage(flow Flow7Tuple) {
+func (f *FlowExporter) GenerateFlowMessage(flow Flow7Tuple) {
 	elements := make([]*entities.InfoElementWithValue, 0)
 	element, err := registry.GetInfoElement("sourceIPv4Address", registry.IANAEnterpriseID)
 	if err != nil {
@@ -130,6 +134,22 @@ func (f *FlowGenerator) GenerateFlowMessage(flow Flow7Tuple) {
 		return
 	}
 	ie = entities.NewInfoElementWithValue(element, flow.FlowEndMilliseconds)
+	elements = append(elements, ie)
+
+	element, err = registry.GetInfoElement("octetTotalCount", registry.IANAEnterpriseID)
+	if err != nil {
+		fmt.Printf("Did not find the element with name octetTotalCount\n")
+		return
+	}
+	ie = entities.NewInfoElementWithValue(element, flow.OctetCount)
+	elements = append(elements, ie)
+
+	element, err = registry.GetInfoElement("packetTotalCount", registry.IANAEnterpriseID)
+	if err != nil {
+		fmt.Printf("Did not find the element with name packetTotalCount\n")
+		return
+	}
+	ie = entities.NewInfoElementWithValue(element, flow.PacketCount)
 	elements = append(elements, ie)
 
 	f.dataSet.AddRecord(elements, f.templateID)
