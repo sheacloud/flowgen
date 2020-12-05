@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 
@@ -14,6 +15,9 @@ type FlowExporter struct {
 	dataSet         entities.Set
 	templateID      uint16
 	FlowRecordsSent uint64
+	RecordBuffer    bytes.Buffer
+	// ElementBuffer   []*entities.InfoElementWithValue
+
 }
 
 func NewFlowExporter(collectorIp net.IP, collectorPort int) *FlowExporter {
@@ -27,6 +31,10 @@ func NewFlowExporter(collectorIp net.IP, collectorPort int) *FlowExporter {
 	fg.exporter = exporter
 
 	templateElementNames := []string{"sourceIPv4Address", "destinationIPv4Address", "sourceTransportPort", "destinationTransportPort", "protocolIdentifier", "flowStartMilliseconds", "flowEndMilliseconds", "octetTotalCount", "packetTotalCount"}
+	// 4 + 4 + 2 + 2 + 1 + 8 + 8 + 8 + 8
+	// 8 + 4 + 1 + 32
+	// 45 bytes per flow, 424880 flows =
+
 	// Create template record with two fields
 	fg.templateID = fg.exporter.NewTemplateID()
 	templateSet := entities.NewSet(entities.Template, fg.templateID, false)
@@ -55,6 +63,9 @@ func NewFlowExporter(collectorIp net.IP, collectorPort int) *FlowExporter {
 	dataSet := entities.NewSet(entities.Data, fg.templateID, false)
 	fg.dataSet = dataSet
 
+	fg.RecordBuffer = bytes.Buffer{}
+	fg.RecordBuffer.Grow(100)
+
 	return &fg
 }
 
@@ -79,14 +90,14 @@ func (f *FlowExporter) CloseExporter() {
 }
 
 func (f *FlowExporter) GenerateFlowMessage(flow Flow7Tuple) {
-	elements := make([]*entities.InfoElementWithValue, 0)
+	elementBuffer := make([]*entities.InfoElementWithValue, 9)
 	element, err := registry.GetInfoElement("sourceIPv4Address", registry.IANAEnterpriseID)
 	if err != nil {
 		fmt.Printf("Did not find the element with name sourceIPv4Address\n")
 		return
 	}
 	ie := entities.NewInfoElementWithValue(element, flow.SrcAddr)
-	elements = append(elements, ie)
+	elementBuffer[0] = ie
 
 	element, err = registry.GetInfoElement("destinationIPv4Address", registry.IANAEnterpriseID)
 	if err != nil {
@@ -94,7 +105,7 @@ func (f *FlowExporter) GenerateFlowMessage(flow Flow7Tuple) {
 		return
 	}
 	ie = entities.NewInfoElementWithValue(element, flow.DstAddr)
-	elements = append(elements, ie)
+	elementBuffer[1] = ie
 
 	element, err = registry.GetInfoElement("sourceTransportPort", registry.IANAEnterpriseID)
 	if err != nil {
@@ -102,7 +113,7 @@ func (f *FlowExporter) GenerateFlowMessage(flow Flow7Tuple) {
 		return
 	}
 	ie = entities.NewInfoElementWithValue(element, flow.SrcPort)
-	elements = append(elements, ie)
+	elementBuffer[2] = ie
 
 	element, err = registry.GetInfoElement("destinationTransportPort", registry.IANAEnterpriseID)
 	if err != nil {
@@ -110,7 +121,7 @@ func (f *FlowExporter) GenerateFlowMessage(flow Flow7Tuple) {
 		return
 	}
 	ie = entities.NewInfoElementWithValue(element, flow.DstPort)
-	elements = append(elements, ie)
+	elementBuffer[3] = ie
 
 	element, err = registry.GetInfoElement("protocolIdentifier", registry.IANAEnterpriseID)
 	if err != nil {
@@ -118,7 +129,7 @@ func (f *FlowExporter) GenerateFlowMessage(flow Flow7Tuple) {
 		return
 	}
 	ie = entities.NewInfoElementWithValue(element, flow.Protocol)
-	elements = append(elements, ie)
+	elementBuffer[4] = ie
 
 	element, err = registry.GetInfoElement("flowStartMilliseconds", registry.IANAEnterpriseID)
 	if err != nil {
@@ -126,7 +137,7 @@ func (f *FlowExporter) GenerateFlowMessage(flow Flow7Tuple) {
 		return
 	}
 	ie = entities.NewInfoElementWithValue(element, flow.FlowStartMilliseconds)
-	elements = append(elements, ie)
+	elementBuffer[5] = ie
 
 	element, err = registry.GetInfoElement("flowEndMilliseconds", registry.IANAEnterpriseID)
 	if err != nil {
@@ -134,7 +145,7 @@ func (f *FlowExporter) GenerateFlowMessage(flow Flow7Tuple) {
 		return
 	}
 	ie = entities.NewInfoElementWithValue(element, flow.FlowEndMilliseconds)
-	elements = append(elements, ie)
+	elementBuffer[6] = ie
 
 	element, err = registry.GetInfoElement("octetTotalCount", registry.IANAEnterpriseID)
 	if err != nil {
@@ -142,7 +153,7 @@ func (f *FlowExporter) GenerateFlowMessage(flow Flow7Tuple) {
 		return
 	}
 	ie = entities.NewInfoElementWithValue(element, flow.OctetCount)
-	elements = append(elements, ie)
+	elementBuffer[7] = ie
 
 	element, err = registry.GetInfoElement("packetTotalCount", registry.IANAEnterpriseID)
 	if err != nil {
@@ -150,7 +161,31 @@ func (f *FlowExporter) GenerateFlowMessage(flow Flow7Tuple) {
 		return
 	}
 	ie = entities.NewInfoElementWithValue(element, flow.PacketCount)
-	elements = append(elements, ie)
+	elementBuffer[8] = ie
 
-	f.dataSet.AddRecord(elements, f.templateID)
+	f.dataSet.AddRecord(elementBuffer, f.templateID)
+}
+
+func (f *FlowExporter) GenerateFlowMessageInStack(flow Flow7Tuple) {
+
+	record := entities.NewDataRecord(f.templateID, f.RecordBuffer)
+	record.PrepareRecord()
+	record.EncodeIPv4Address(flow.SrcAddr)
+	record.EncodeIPv4Address(flow.DstAddr)
+	record.EncodeUint16(flow.SrcPort)
+	record.EncodeUint16(flow.DstPort)
+	record.EncodeUint8(flow.Protocol)
+	record.EncodeUint64(flow.FlowStartMilliseconds)
+	record.EncodeUint64(flow.FlowEndMilliseconds)
+	record.EncodeUint64(flow.OctetCount)
+	record.EncodeUint64(flow.PacketCount)
+
+	f.dataSet.EncodeDataRecord(record)
+
+	if f.GetCurrentMessageSize() >= 60000 {
+		f.dataSet.ResetBuffer()
+	}
+
+	f.RecordBuffer.Reset()
+
 }
